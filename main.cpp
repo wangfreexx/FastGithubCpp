@@ -480,6 +480,15 @@ static std::vector<std::string> rank_ips(const std::string& host, uint16_t port,
     return ranked;
 }
 
+static void forget_ip(const std::string& host, const std::string& ip) {
+    std::lock_guard<std::mutex> lk(g_speed_mu);
+    auto it = g_speed_cache.find(host);
+    if (it == g_speed_cache.end()) return;
+    auto& v = it->second.ips;
+    v.erase(std::remove(v.begin(), v.end(), ip), v.end());
+    it->second.expire = 0;
+}
+
 static bool domain_match(const std::string& host, const std::vector<std::string>& patterns) {
     std::string h = host;
     while (!h.empty() && h.back() == '.') h.pop_back();
@@ -602,6 +611,22 @@ static Upstream connect_upstream_validated(const std::string& host, uint16_t por
                 else usable = false;
             } else {
                 usable = false;
+            }
+            // A TLS alert or Fastly error page also counts as "first byte".
+            // Only a real ServerHello means this IP actually serves the host.
+            auto is_server_hello = [](const std::string& b) {
+                if (b.size() < 9) return false;
+                const auto* u = reinterpret_cast<const uint8_t*>(b.data());
+                if (u[0] != 0x16 || u[1] != 0x03 || u[2] > 0x04) return false;
+                if (be16(u + 3) < 4) return false;
+                return u[5] == 0x02;  // handshake type = ServerHello
+            };
+            if (usable && !is_server_hello(first)) {
+                log_line(c, host + " reject " + candidates[i] + " (not TLS ServerHello)");
+                forget_ip(host, candidates[i]);
+                usable = false;
+            } else if (!usable) {
+                forget_ip(host, candidates[i]);
             }
         }
         if (!usable) {
