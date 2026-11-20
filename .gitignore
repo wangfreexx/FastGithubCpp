@@ -1,0 +1,6 @@
+*.log
+*.stats
+*.res
+*.o
+*.obj
+.vscode/
